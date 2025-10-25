@@ -683,6 +683,275 @@ function updateAndValidateCardUI(card) {
 
 // --- ▼▼▼ [エラー修正] UI更新関数群を initDiscCalculatorPage より前に定義 ▼▼▼ ---
 
+/**
+ * discNum に基づいてディスク入力カードのHTMLを生成する
+ * @param {number} discNum - ディスク番号 (1-6)
+ * @returns {string} HTML文字列
+ */
+function createDiscInputCardHTML(discNum) {
+  const cardState = cardStates[discNum] || { level: 15, initialOpCount: 4, evaluationCriteria: 'maxLevel', subStats: [{},{},{},{}], useSoftCap: false };
+  const subStatOptions = subStatsGrowthData.map(s => `<option value="${s.name}">${s.name}</option>`).join('');
+
+  return `
+    <div class="disc-input-card card p-4" data-card-id="${discNum}">
+      <div class="flex justify-between items-center mb-4">
+        <h3 class="text-lg font-bold text-[var(--text-primary)]">ディスク ${discNum}</h3>
+        <div id="soft-cap-checkbox-container-${discNum}" class="hidden items-center gap-2">
+            <label for="soft-cap-checkbox-${discNum}" class="text-xs font-bold text-amber-500">閾値評価</label>
+            <input type="checkbox" id="soft-cap-checkbox-${discNum}" class="soft-cap-checkbox" ${cardState.useSoftCap ? 'checked' : ''}>
+            <span class="tooltip ml-1">(?)<span id="soft-cap-tooltip-${discNum}" class="tooltip-text tooltip-text-improved"></span></span>
+        </div>
+      </div>
+
+      <!-- Card Controls -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+        <div id="calc-level-wrapper-${discNum}">
+          <label class="block text-xs font-bold text-[var(--text-secondary)] mb-1">レベル</label>
+        </div>
+        <div>
+          <label class="block text-xs font-bold text-[var(--text-secondary)] mb-1">初期OP数</label>
+          <div class="op-toggle-group">
+            <button class="op-toggle-btn ${cardState.initialOpCount === 3 ? 'active' : ''}" data-op="3" aria-pressed="${cardState.initialOpCount === 3}">3 OP</button>
+            <button class="op-toggle-btn ${cardState.initialOpCount === 4 ? 'active' : ''}" data-op="4" aria-pressed="${cardState.initialOpCount === 4}">4 OP</button>
+          </div>
+        </div>
+        <div>
+          <label class="block text-xs font-bold text-[var(--text-secondary)] mb-1">評価基準</label>
+          <div class="op-toggle-group">
+            <button class="op-toggle-btn ${cardState.evaluationCriteria === 'maxLevel' ? 'active' : ''}" data-eval="maxLevel" aria-pressed="${cardState.evaluationCriteria === 'maxLevel'}">最大Lv</button>
+            <button class="op-toggle-btn ${cardState.evaluationCriteria === 'currentLevel' ? 'active' : ''}" data-eval="currentLevel" aria-pressed="${cardState.evaluationCriteria === 'currentLevel'}">現在Lv</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Main Stat -->
+      <div class="mb-4">
+        <label class="block text-xs font-bold text-[var(--text-secondary)] mb-1">メインステータス
+          <span class="main-stat-er-display text-xs font-normal text-sky-400 ml-2"></span>
+        </label>
+        <div class="flex items-center gap-4 p-2 rounded-lg bg-[var(--bg-tertiary)]">
+          <div class="main-stat-wrapper flex-1"></div>
+          <div class="calc-main-stat-value font-bold text-lg text-[var(--text-accent)] min-w-[60px] text-right"></div>
+        </div>
+      </div>
+
+      <!-- Sub Stats -->
+      <div>
+        <div class="flex justify-between items-center mb-1">
+            <label class="block text-xs font-bold text-[var(--text-secondary)]">サブステータス</label>
+            <div class="text-xs text-[var(--text-secondary)]">
+                強化回数: <span class="sub-upgrades-current font-bold">0</span> / <span class="sub-upgrades-limit font-bold">5</span>
+            </div>
+        </div>
+        <div class="sub-stats-grid space-y-2">
+          ${[...Array(4)].map((_, i) => `
+            <div class="sub-stat-row grid grid-cols-[1fr,auto,auto] items-center gap-2" data-index="${i}">
+              <div class="select-wrapper-sub-stat relative">
+                <div class="value-feedback-indicator absolute left-0 top-1/2 -translate-y-1/2 w-1.5 h-4 rounded-full value-feedback-gray"></div>
+                <select class="calc-sub-stat w-full pl-4" id="calc-sub-stat-${discNum}-${i}">
+                  <option value="">サブステ${i + 1}...</option>
+                  ${subStatOptions}
+                </select>
+              </div>
+              <div class="flex items-center gap-1 hit-selector">
+                <button class="hit-change-btn" data-action="minus" aria-label="HIT数を減らす">-</button>
+                <span class="calc-sub-hits-display text-center font-bold text-sm w-4" aria-live="polite">${cardState.subStats[i]?.hits || 1}</span>
+                <button class="hit-change-btn" data-action="plus" aria-label="HIT数を増やす">+</button>
+              </div>
+              <input type="text" class="calc-sub-value w-20 text-right bg-[var(--bg-tertiary)] border border-[var(--border-secondary)] rounded-md px-2 py-1 text-sm" placeholder="数値">
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+/**
+ * `activeDiscs` に基づいてディスク入力カードをレンダリングする
+ */
+function renderActiveDiscs() {
+  const container = document.getElementById('calc-discs-container');
+  if (!container) return;
+
+  const sortedActive = [...activeDiscs].sort((a, b) => a - b);
+  let focusedElementId = document.activeElement?.id; // フォーカス記憶
+
+  // 既存のカードをDOMから取得
+  const existingCardElements = new Map();
+  container.querySelectorAll('.disc-input-card').forEach(card => {
+    existingCardElements.set(parseInt(card.dataset.cardId, 10), card);
+  });
+
+  const newCardElements = [];
+  let needsRerender = false;
+
+  // 足りないカードを追加
+  for (const discNum of sortedActive) {
+    if (!existingCardElements.has(discNum)) {
+      needsRerender = true;
+      break;
+    }
+  }
+  // 不要なカードを削除
+  if (existingCardElements.size !== sortedActive.length) {
+    needsRerender = true;
+  }
+
+
+  if (needsRerender) {
+      container.innerHTML = sortedActive.map(createDiscInputCardHTML).join('');
+  } else {
+      // 順番だけ更新
+      sortedActive.forEach(discNum => {
+          container.appendChild(existingCardElements.get(discNum));
+      });
+  }
+
+
+  // レンダリング後にカスタムセレクトを初期化し、状態を復元
+  sortedActive.forEach(discNum => {
+    const card = container.querySelector(`.disc-input-card[data-card-id="${discNum}"]`);
+    if (!card) return;
+
+    // レベル選択
+    const levelWrapper = card.querySelector(`#calc-level-wrapper-${discNum}`);
+    const levelSelect = document.createElement('select');
+    levelSelect.id = `calc-level-${discNum}`;
+    levelSelect.innerHTML = [0, 3, 6, 9, 12, 15].map(l => `<option value="${l}" ${cardStates[discNum]?.level === l ? 'selected' : ''}>Lv.${l}</option>`).join('');
+    // ▼▼▼ [UI改善] レベル選択にカスタムスタイルを適用 ▼▼▼
+    const customLevelSelect = createCustomSelect(levelSelect, {
+        containerClass: 'level-select' // 'level-select' クラスを追加
+    });
+    levelWrapper.appendChild(customLevelSelect);
+     // ▼▼▼ [修正] 初期選択オプションをLv15に設定 ▼▼▼
+     if(cardStates[discNum]?.level === undefined) { // 保存された値がなければ
+        levelSelect.value = '15';
+        updateCustomSelectDisplay(customLevelSelect);
+     }
+
+
+    // メインステータス選択
+    updateMainStatOptions(card, discNum, cardStates[discNum]?.mainStat || '');
+
+    // サブステータス選択と数値
+    card.querySelectorAll('.sub-stat-row').forEach((row, i) => {
+      const subStat = cardStates[discNum]?.subStats?.[i];
+      if (subStat?.name) {
+        const select = row.querySelector('.calc-sub-stat');
+        select.value = subStat.name;
+        // カスタムセレクトの表示更新
+        const customSelectContainer = select.closest('.custom-select-container');
+        if (customSelectContainer) updateCustomSelectDisplay(customSelectContainer);
+        // 数値とHIT数も復元
+        const hitDisplay = row.querySelector('.calc-sub-hits-display');
+        const valueInput = row.querySelector('.calc-sub-value');
+        if(hitDisplay) hitDisplay.textContent = subStat.hits || 1;
+        if(valueInput) {
+            const perHit = getSubStatPerHitValue(subStat.name);
+            valueInput.value = formatStatValue((subStat.hits || 1) * perHit, subStat.name);
+        }
+      }
+    });
+
+    // その他UIの更新
+    updateAndValidateCardUI(card);
+    updateValueFeedback(card);
+  });
+
+  // フォーカス復元
+  if (focusedElementId) {
+    const focusedElement = document.getElementById(focusedElementId);
+    focusedElement?.focus();
+  }
+}
+
+/**
+ * ディスク部位の表示/非表示を切り替える
+ * @param {number} discNum - ディスク番号
+ */
+function toggleDiscSelection(discNum) {
+  if (activeDiscs.has(discNum)) {
+    if (activeDiscs.size > 1) { // 最低1つは残す
+      activeDiscs.delete(discNum);
+    } else {
+      showToast('最低1つのディスク部位を選択してください。', 'bg-yellow-500');
+    }
+  } else {
+    activeDiscs.add(discNum);
+  }
+  saveCalculatorState(); // 状態を保存
+  renderActiveDiscs(); // 再描画
+
+  // ボタンのARIA属性とクラスを更新
+  const button = document.querySelector(`.disc-selector-circle[data-disc-num="${discNum}"]`);
+  if (button) {
+      const isActive = activeDiscs.has(discNum);
+      button.classList.toggle('active', isActive);
+      button.setAttribute('aria-pressed', isActive.toString());
+  }
+}
+
+
+/**
+ * DOMから特定のカードの状態を読み取る
+ * @param {HTMLElement} card - .disc-input-card 要素
+ * @returns {object} カードの状態オブジェクト
+ */
+function readCardState(card) {
+    const discNum = parseInt(card.dataset.cardId, 10);
+    const levelSelect = card.querySelector(`#calc-level-${discNum}`);
+    const mainStatEl = card.querySelector('.main-stat-placeholder, .calc-main-stat');
+
+    const state = {
+        discNum: discNum,
+        level: levelSelect ? parseInt(levelSelect.value, 10) : 15,
+        initialOpCount: parseInt(card.querySelector('.op-toggle-btn.active[data-op]')?.dataset.op || '4', 10),
+        evaluationCriteria: card.querySelector('.op-toggle-btn.active[data-eval]')?.dataset.eval || 'maxLevel',
+        mainStat: mainStatEl?.value || mainStatEl?.dataset.value || '',
+        subStats: [],
+        useSoftCap: card.querySelector(`#soft-cap-checkbox-${discNum}`)?.checked || false,
+    };
+
+    card.querySelectorAll('.sub-stat-row').forEach(row => {
+        const nameSelect = row.querySelector('.calc-sub-stat');
+        const hitsDisplay = row.querySelector('.calc-sub-hits-display');
+        state.subStats.push({
+            name: nameSelect?.value || '',
+            hits: hitsDisplay ? parseInt(hitsDisplay.textContent, 10) : 1,
+        });
+    });
+
+    return state;
+}
+
+/**
+ * キャラクター選択に基づきソフトキャップチェックボックスの表示を切り替え
+ */
+function updateSoftCapCheckboxVisibility() {
+    const agentId = document.getElementById('calc-agent-select')?.value;
+    const softCapInfo = getCharacterSoftCapInfo(agentId);
+
+    document.querySelectorAll('.disc-input-card').forEach(card => {
+        const discNum = card.dataset.cardId;
+        const container = card.querySelector(`#soft-cap-checkbox-container-${discNum}`);
+        const tooltip = card.querySelector(`#soft-cap-tooltip-${discNum}`);
+        if(!container || !tooltip) return;
+
+        if (softCapInfo.hasSoftCap) {
+            container.classList.remove('hidden');
+            container.classList.add('flex');
+            tooltip.textContent = softCapInfo.description;
+        } else {
+            container.classList.add('hidden');
+            container.classList.remove('flex');
+             // 非表示になったらチェックも外す
+            const checkbox = card.querySelector(`#soft-cap-checkbox-${discNum}`);
+            if(checkbox) checkbox.checked = false;
+        }
+    });
+}
+
 
 // --- EVENT HANDLERS ---
 
@@ -942,7 +1211,7 @@ export function initDiscCalculatorPage() {
             </div>
             <div class="sm:row-span-2">
               <label class="block text-sm font-bold text-[var(--text-secondary)] mb-1">ディスク部位
-                <span class="tooltip ml-1">(?)<span class="tooltip-text tooltip-text-improved">計算したいディスクの部位を選択してください。複数選択可能です。</span></span>
+                <span class="tooltip ml-1"><span class="material-symbols-outlined text-sm">help</span><span class="tooltip-text tooltip-text-improved">計算したいディスクの部位を選択してください。複数選択可能です。</span></span>
               </label>
               <div class="disc-selector-container">
                 <div class="disc-selector-hexagon">
@@ -961,7 +1230,7 @@ export function initDiscCalculatorPage() {
                   <div class="rich-toggle-switch"><div class="rich-toggle-switch-handle"></div></div>
                   <span class="text-sm font-medium text-[var(--text-secondary)]">自動計算</span>
                </label>
-               <span class="tooltip ml-1">(?)<span class="tooltip-text tooltip-text-improved">ONにすると、入力変更時に自動でスコアを再計算します。OFFの場合は「スコアを計算」ボタンを押してください。</span></span>
+               <span class="tooltip ml-1"><span class="material-symbols-outlined text-sm">help</span><span class="tooltip-text tooltip-text-improved">ONにすると、入力変更時に自動でスコアを再計算します。OFFの場合は「スコアを計算」ボタンを押してください。</span></span>
             </div>
           </div>
         </div>
@@ -978,7 +1247,7 @@ export function initDiscCalculatorPage() {
           </div>
            <div id="calc-other-agents-container" class="mt-6 hidden">
                 <h3 class="text-lg font-bold text-[var(--text-primary)] mb-3 border-l-4 border-sky-400 pl-3">他キャラでの評価 Top 5
-                   <span class="tooltip ml-1">(?)<span class="tooltip-text tooltip-text-improved">入力されたディスクを全キャラで評価した場合のスコア上位5名です。クリックで詳細を確認できます。</span></span>
+                   <span class="tooltip ml-1"><span class="material-symbols-outlined text-sm">help</span><span class="tooltip-text tooltip-text-improved">入力されたディスクを全キャラで評価した場合のスコア上位5名です。クリックで詳細を確認できます。</span></span>
                 </h3>
                 <div id="other-agents-filters" class="flex flex-wrap gap-2 mb-3 bg-[var(--bg-tertiary)] p-1 rounded-lg">
                      <button data-role="all" class="other-agent-filter-btn active">全て</button>
@@ -995,7 +1264,7 @@ export function initDiscCalculatorPage() {
                  <button id="save-to-my-discs-btn" class="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-2 px-4 rounded-lg transition interactive-scale text-sm flex items-center justify-center gap-1">
                     <span class="material-symbols-outlined text-base" aria-hidden="true">save</span><span>マイディスクに保存</span>
                  </button>
-                 <span class="tooltip ml-1">(?)<span class="tooltip-text tooltip-text-improved">現在計算対象となっている全ディスクを、個別の装備として「マイディスク」に保存します（ログインが必要です）。</span></span>
+                 <span class="tooltip ml-1"><span class="material-symbols-outlined text-sm">help</span><span class="tooltip-text tooltip-text-improved">現在計算対象となっている全ディスクを、個別の装備として「マイディスク」に保存します（ログインが必要です）。</span></span>
            </div>
         </div>
       </div>
